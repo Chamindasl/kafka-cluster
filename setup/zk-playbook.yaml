@@ -51,8 +51,26 @@
     - name: Add all nodes to hosts file
       lineinfile:
         dest: /etc/hosts
-        line: '192.168.50.{{ item }}0 zoo{{ item }}'
+        line: '192.168.50.{{ item }}0 {{ VM_NAME }}{{ item }}'
       with_sequence: start=1 end={{ nodes }} stride=1
+
+    - name: Comment localhost entry otherwise port binging would be a problem
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '(^127\.\d\.\d\.\d)(\s*{{ VM_NAME }}{{ node_id }}.*)'
+        line: '#\1\2'
+        backrefs: yes
+
+
+    - name: Ensure group "confluent" exists
+      ansible.builtin.group:
+        name: confluent
+        state: present
+
+    - name: Add the user 'cp-kafka'
+      ansible.builtin.user:
+        name: cp-kafka
+        group: confluent
 
     - name: Remove content of zookeeper.properties
       file:
@@ -63,6 +81,7 @@
       file:
         path: /etc/kafka/zookeeper.properties
         state: touch
+        mode: '1777'
 
     - name: Add static content for zookeeper.properties
       lineinfile:
@@ -80,17 +99,34 @@
     - name: Add dynamic content for zookeeper.properties
       lineinfile:
         dest: /etc/kafka/zookeeper.properties
-        line: 'server.{{ item }}=zoo{{ item }}:2888:3888'
+        line: 'server.{{ item }}={{ VM_NAME }}{{ item }}:2888:3888'
       with_sequence: start=1 end={{ nodes }} stride=1
 
     - name: Ensures zookeeper/ dir exists
-      file: path=/var/lib/zookeeper/ state=directory
+      file:
+        path: /var/lib/zookeeper/
+        state: directory
+        mode: '0777'
+
+    - name: Ensures var/log/kafka dir exists
+      file:
+        path: /var/log/kafka/
+        state: directory
+        mode: '0777'
+
+    - name: Ensures var/lib/kafka dir exists
+      file:
+        path: /var/lib/kafka/
+        state: directory
+        mode: '0777'
+
 
     - name: Set Zookeeper ID
       copy:
         dest: /var/lib/zookeeper/myid
         content: |
           {{ node_id }}
+        mode: '1777'
 
     - name: Set Kafka server
       replace:
@@ -99,122 +135,30 @@
         replace: "{{ item.replace }}"
       with_items:
         - { regexp1: 'broker.id=0', replace: 'broker.id={{ node_id }}'}
-        - { regexp1: '#advertised.listeners=PLAINTEXT://your.host.name:9092', replace: 'advertised.listeners=PLAINTEXT://zoo{{ node_id }}:9092' }
-        - { regexp1: 'zookeeper.connect=localhost:2181', replace: 'zookeeper.connect=zoo1:2181' }
+        - { regexp1: '#advertised.listeners=PLAINTEXT://your.host.name:9092', replace: 'advertised.listeners=PLAINTEXT://{{ VM_NAME }}{{ node_id }}:9092' }
+        - { regexp1: 'zookeeper.connect=localhost:2181', replace: 'zookeeper.connect={{ VM_NAME }}1:2181' }
 
     - name: Restart confluent-zookeeper
       service:
         name: confluent-zookeeper
         daemon_reload: yes
         state: restarted
+        enabled: yes
+
+    - name: Sleep for 10 seconds before restart kafka
+      wait_for:
+        timeout: 10
+      delegate_to: localhost
 
     - name: Restart confluent-kafka
       service:
         name: confluent-kafka
         daemon_reload: yes
         state: restarted
+        enabled: yes
 
   handlers:
     - name: confluent-zookeeper status
       service: name=confluent-zookeeper state=started
     - name: confluent-kafka status
       service: name=confluent-kafka state=started
-
-
-
-
-
-#    - name: Remove content of zookeeper.properties
-#      file:
-#        dest: "/tmp/abc/{{ item }}"
-#        state: absent
-#      with_sequence: start=1 end={{ nodes }} stride=1
-
-#
-#    - name: Add vagrant user to docker group
-#      user:
-#        name: vagrant
-#        group: docker
-#
-#    - name: Remove swapfile from /etc/fstab
-#      mount:
-#        name: "{{ item }}"
-#        fstype: swap
-#        state: absent
-#      with_items:
-#        - swap
-#        - none
-#
-#    - name: Disable swap
-#      command: swapoff -a
-#      when: ansible_swaptotal_mb > 0
-#
-#    - name: Add an apt signing key for Kubernetes
-#      apt_key:
-#        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
-#        state: present
-#
-#    - name: Adding apt repository for Kubernetes
-#      apt_repository:
-#        repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
-#        state: present
-#        filename: kubernetes.list
-#
-#    - name: Install Kubernetes binaries
-#      apt:
-#        name: "{{ packages }}"
-#        state: present
-#        update_cache: yes
-#      vars:
-#        packages:
-#          - kubelet
-#          - kubeadm
-#          - kubectl
-#
-#    - name: Set Node IP
-#      copy:
-#        content: "KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
-#        dest: /etc/default/kubelet
-#        force: no
-#        group: root
-#        owner: root
-#        mode: 0644
-#
-#    - name: Restart kubelet
-#      service:
-#        name: kubelet
-#        daemon_reload: yes
-#        state: restarted
-#
-#    - name: Initialize the Kubernetes cluster using kubeadm
-#      command: kubeadm init --apiserver-advertise-address="192.168.50.10" --apiserver-cert-extra-sans="192.168.50.10"  --node-name km --pod-network-cidr=192.168.0.0/16
-#
-#    - name: Setup kubeconfig for vagrant user
-#      command: "{{ item }}"
-#      with_items:
-#        - mkdir -p /home/vagrant/.kube
-#        - cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
-#        - chown vagrant:vagrant /home/vagrant/.kube/config
-#
-#    - name: Install calico pod network
-#      become: false
-#      command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
-#
-#    - name: Generate join command
-#      command: kubeadm token create --print-join-command
-#      register: join_command
-#
-#    - name: Copy join command to local file
-#      copy:
-#        dest: "/vagrant/kubernetes-setup/join-command"
-#        content: "{{ join_command.stdout_lines[0] }}"
-#
-#    - name: Add autocomplete permanently to bash shell
-#      become: false
-#      lineinfile:
-#        path: /home/vagrant/.bashrc
-#        line: source <(kubectl completion bash)
-#
-#  handlers:
-#    - name: docker status
-#      service: name=docker state=started
